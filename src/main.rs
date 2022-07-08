@@ -9,6 +9,11 @@ use inspect::Inspect;
 mod invoke;
 use invoke::Invoke;
 
+mod logs;
+use logs::Logs;
+
+mod txmeta;
+
 #[derive(Parser, Debug)]
 #[clap(author, version, about, long_about = None)]
 struct Root {
@@ -20,6 +25,7 @@ struct Root {
 enum Cmd {
     Inspect(Inspect),
     Invoke(Invoke),
+    Logs(Logs),
 }
 
 #[derive(Error, Debug)]
@@ -28,12 +34,15 @@ enum CmdError {
     Inspect(#[from] inspect::Error),
     #[error("invoke")]
     Invoke(#[from] invoke::Error),
+    #[error("logs")]
+    Logs(#[from] logs::Error),
 }
 
 fn run(cmd: Cmd) -> Result<(), CmdError> {
     match cmd {
         Cmd::Inspect(inspect) => inspect.run()?,
         Cmd::Invoke(invoke) => invoke.run()?,
+        Cmd::Logs(logs) => logs.run()?,
     };
     Ok(())
 }
