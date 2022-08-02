@@ -11,14 +11,10 @@ use std::{
     str::Utf8Error,
 };
 
-use stellar_contract_env_host::xdr::{
+use soroban_env_host::xdr::{
     Error as XdrError,
     LedgerCloseMeta,
     ReadXdr,
-    ScVal,
-    ScVec,
-    VecM,
-    WriteXdr,
 };
 
 pub trait LedgerBackend {

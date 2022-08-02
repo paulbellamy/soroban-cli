@@ -1,21 +1,20 @@
-use clap::{Parser, Subcommand};
+use clap::{AppSettings, Parser, Subcommand};
 use thiserror::Error;
 
-mod strval;
-
+mod deploy;
 mod inspect;
-use inspect::Inspect;
-
 mod invoke;
-use invoke::Invoke;
-
-mod logs;
-use logs::Logs;
+mod snapshot;
+mod strval;
+mod utils;
+mod version;
+mod events;
 
 mod txmeta;
 
 #[derive(Parser, Debug)]
-#[clap(author, version, about, long_about = None)]
+#[clap(author, version, about, long_about = None, disable_help_subcommand = true, disable_version_flag = true)]
+#[clap(global_setting(AppSettings::DeriveDisplayOrder))]
 struct Root {
     #[clap(subcommand)]
     cmd: Cmd,
@@ -23,9 +22,16 @@ struct Root {
 
 #[derive(Subcommand, Debug)]
 enum Cmd {
-    Inspect(Inspect),
-    Invoke(Invoke),
-    Logs(Logs),
+    /// Invoke a contract function in a WASM file
+    Invoke(invoke::Cmd),
+    /// Inspect a WASM file listing contract functions, meta, etc
+    Inspect(inspect::Cmd),
+    /// Stream events from a contract
+    Events(events::Cmd),
+    /// Deploy a WASM file as a contract
+    Deploy(deploy::Cmd),
+    /// Print version information
+    Version(version::Cmd),
 }
 
 #[derive(Error, Debug)]
@@ -34,15 +40,19 @@ enum CmdError {
     Inspect(#[from] inspect::Error),
     #[error("invoke")]
     Invoke(#[from] invoke::Error),
-    #[error("logs")]
-    Logs(#[from] logs::Error),
+    #[error("events")]
+    Events(#[from] events::Error),
+    #[error("deploy")]
+    Deploy(#[from] deploy::Error),
 }
 
 fn run(cmd: Cmd) -> Result<(), CmdError> {
     match cmd {
         Cmd::Inspect(inspect) => inspect.run()?,
         Cmd::Invoke(invoke) => invoke.run()?,
-        Cmd::Logs(logs) => logs.run()?,
+        Cmd::Events(events) => events.run()?,
+        Cmd::Deploy(deploy) => deploy.run()?,
+        Cmd::Version(version) => version.run(),
     };
     Ok(())
 }
@@ -50,6 +60,6 @@ fn run(cmd: Cmd) -> Result<(), CmdError> {
 fn main() {
     let root = Root::parse();
     if let Err(e) = run(root.cmd) {
-        println!("error: {:?}", e);
+        eprintln!("error: {:?}", e);
     }
 }

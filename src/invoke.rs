@@ -1,29 +1,50 @@
-use std::{
-    fmt::Debug,
-    fs::{self},
-    io,
-    rc::Rc,
-};
+use std::{fmt::Debug, fs, io, io::Cursor, rc::Rc};
 
 use clap::Parser;
-use stellar_contract_env_host::{
+use soroban_env_host::{
+    budget::CostType,
     storage::Storage,
-    xdr::{Error as XdrError, ScVal, ScVec},
+    xdr::{
+        Error as XdrError, HostFunction, ReadXdr, ScHostStorageErrorCode, ScObject, ScSpecEntry,
+        ScSpecFunctionV0, ScStatus, ScVal,
+    },
     Host, HostError, Vm,
 };
 
+use hex::FromHexError;
+
+use crate::snapshot;
 use crate::strval::{self, StrValError};
+use crate::utils;
 
 #[derive(Parser, Debug)]
-pub struct Invoke {
+pub struct Cmd {
+    /// Contract ID to invoke
+    #[clap(long = "id")]
+    contract_id: String,
+    /// WASM file to deploy to the contract ID and invoke
     #[clap(long, parse(from_os_str))]
-    file: std::path::PathBuf,
-    #[clap(long, parse(from_os_str), default_value("ledger.xdr"))]
-    snapshot_file: std::path::PathBuf,
+    wasm: Option<std::path::PathBuf>,
+    /// Function name to execute
     #[clap(long = "fn")]
     function: String,
-    #[clap(long = "arg", multiple_occurrences = true)]
+    /// Argument to pass to the function
+    #[clap(long = "arg", value_name = "arg", multiple = true)]
     args: Vec<String>,
+    /// Argument to pass to the function (base64-encoded xdr)
+    #[clap(
+        long = "arg-xdr",
+        value_name = "arg-xdr",
+        multiple = true,
+        conflicts_with = "args"
+    )]
+    args_xdr: Vec<String>,
+    /// Output the cost execution to stderr
+    #[clap(long = "cost")]
+    cost: bool,
+    /// File to persist ledger state
+    #[clap(long, parse(from_os_str), default_value("ledger.json"))]
+    ledger_file: std::path::PathBuf,
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -36,118 +57,103 @@ pub enum Error {
     Xdr(#[from] XdrError),
     #[error("host")]
     Host(#[from] HostError),
+    #[error("snapshot")]
+    Snapshot(#[from] snapshot::Error),
+    #[error("serde")]
+    Serde(#[from] serde_json::Error),
+    #[error("hex")]
+    FromHex(#[from] FromHexError),
+    #[error("contractnotfound")]
+    FunctionNotFoundInContractSpec,
 }
 
-pub mod snapshot {
-    use std::fs::File;
-
-    use super::{Error, HostError};
-    use stellar_contract_env_host::{
-        im_rc::OrdMap,
-        storage::SnapshotSource,
-        xdr::{LedgerEntry, LedgerKey, ReadXdr, WriteXdr},
-    };
-
-    pub struct Snap {
-        pub ledger_entries: OrdMap<LedgerKey, LedgerEntry>,
-    }
-
-    impl SnapshotSource for Snap {
-        fn get(&self, key: &LedgerKey) -> Result<LedgerEntry, HostError> {
-            match self.ledger_entries.get(key) {
-                Some(v) => Ok(v.clone()),
-                None => Err(HostError::General("missing entry")),
-            }
-        }
-        fn has(&self, key: &LedgerKey) -> Result<bool, HostError> {
-            Ok(self.ledger_entries.contains_key(key))
-        }
-    }
-
-    // snapshot_file format is the LedgerKey followed by the
-    // corresponding LedgerEntry, all in xdr.
-    // Ex.
-    // LedgerKey1LedgerEntry1LedgerKey2LedgerEntry2
-    // ...
-
-    pub fn read(input_file: &std::path::PathBuf) -> Result<OrdMap<LedgerKey, LedgerEntry>, Error> {
-        let mut res = OrdMap::new();
-
-        let mut file = match File::open(input_file) {
-            Ok(f) => f,
-            Err(e) => {
-                //File doesn't exist, so treat this as an empty database and the file will be created later
-                if e.kind() == std::io::ErrorKind::NotFound {
-                    return Ok(res);
-                }
-                return Err(Error::Io(e));
-            }
-        };
-
-        while let (Ok(lk), Ok(le)) = (
-            LedgerKey::read_xdr(&mut file),
-            LedgerEntry::read_xdr(&mut file),
-        ) {
-            res.insert(lk, le);
-        }
-
-        Ok(res)
-    }
-
-    pub fn commit(
-        mut new_state: OrdMap<LedgerKey, LedgerEntry>,
-        storage_map: &OrdMap<LedgerKey, Option<LedgerEntry>>,
-        output_file: &std::path::PathBuf,
-    ) -> Result<(), Error> {
-        //Need to start off with the existing snapshot (new_state) since it's possible the storage_map did not touch every existing entry
-        let mut file = File::create(output_file)?;
-        for (lk, ole) in storage_map {
-            if let Some(le) = ole {
-                new_state.insert(lk.clone(), le.clone());
-            } else {
-                new_state.remove(lk);
-            }
-        }
-
-        for (lk, le) in new_state {
-            lk.write_xdr(&mut file)?;
-            le.write_xdr(&mut file)?;
-        }
-
-        Ok(())
-    }
-}
-
-impl Invoke {
+impl Cmd {
     pub fn run(&self) -> Result<(), Error> {
-        let contents = fs::read(&self.file).unwrap();
+        let contract_id: [u8; 32] = utils::contract_id_from_str(&self.contract_id)?;
 
         // Initialize storage and host
         // TODO: allow option to separate input and output file
-        let ledger_entries = snapshot::read(&self.snapshot_file)?;
+        let mut ledger_entries = snapshot::read(&self.ledger_file)?;
+
+        //If a file is specified, deploy the contract to storage
+        if let Some(f) = &self.wasm {
+            let contract = fs::read(f).unwrap();
+            utils::add_contract_to_ledger_entries(&mut ledger_entries, contract_id, contract)?;
+        }
+
         let snap = Rc::new(snapshot::Snap {
             ledger_entries: ledger_entries.clone(),
         });
-        let storage = Storage::with_recording_footprint(snap);
-
+        let mut storage = Storage::with_recording_footprint(snap);
+        let contents = utils::get_contract_wasm_from_storage(&mut storage, contract_id)?;
         let h = Host::with_storage(storage);
 
-        //TODO: contractID should be user specified
         let vm = Vm::new(&h, [0; 32].into(), &contents).unwrap();
-        let args = self
-            .args
-            .iter()
-            .map(|a| strval::from_string(&h, a))
-            .collect::<Result<Vec<ScVal>, StrValError>>()?;
-        let res = vm.invoke_function(&h, &self.function, &ScVec(args.try_into()?))?;
-        let res_str = strval::to_string(&h, res);
-        println!("{}", res_str);
+        let input_types = match Self::function_spec(&vm, &self.function) {
+            Some(s) => s.input_types,
+            None => {
+                return Err(Error::FunctionNotFoundInContractSpec);
+            }
+        };
 
-        let storage = h
-            .recover_storage()
-            .map_err(|_h| HostError::General("could not get storage from host"))?;
+        // re-assemble the args, to match the order given on the command line
+        let args: Vec<ScVal> = if self.args_xdr.is_empty() {
+            self.args
+                .iter()
+                .zip(input_types.iter())
+                .map(|(a, t)| strval::from_string(a, t))
+                .collect::<Result<Vec<_>, _>>()?
+        } else {
+            self.args_xdr
+                .iter()
+                .map(|a| match base64::decode(a) {
+                    Err(_) => Err(StrValError::InvalidValue),
+                    Ok(b) => ScVal::from_xdr(b).map_err(StrValError::Xdr),
+                })
+                .collect::<Result<Vec<_>, _>>()?
+        };
 
-        snapshot::commit(ledger_entries, &storage.map, &self.snapshot_file)?;
+        let mut complete_args = vec![
+            ScVal::Object(Some(ScObject::Binary(contract_id.try_into()?))),
+            ScVal::Symbol((&self.function).try_into()?),
+        ];
+        complete_args.extend_from_slice(args.as_slice());
+
+        let res = h.invoke_function(HostFunction::Call, complete_args.try_into()?)?;
+        println!("{}", strval::to_string(&res)?);
+
+        if self.cost {
+            h.get_budget(|b| {
+                eprintln!("Cpu Insns: {}", b.cpu_insns.get_count());
+                eprintln!("Mem Bytes: {}", b.mem_bytes.get_count());
+                for cost_type in CostType::variants() {
+                    eprintln!("Cost ({:?}): {}", cost_type, b.get_input(*cost_type));
+                }
+            });
+        }
+
+        let storage = h.recover_storage().map_err(|_h| {
+            HostError::from(ScStatus::HostStorageError(
+                ScHostStorageErrorCode::UnknownError,
+            ))
+        })?;
+
+        snapshot::commit(ledger_entries, Some(&storage.map), &self.ledger_file)?;
         Ok(())
+    }
+
+    fn function_spec(vm: &Rc<Vm>, name: &str) -> Option<ScSpecFunctionV0> {
+        let spec = vm.custom_section("contractspecv0")?;
+        let mut cursor = Cursor::new(spec);
+        for spec_entry in ScSpecEntry::read_xdr_iter(&mut cursor).flatten() {
+            if let ScSpecEntry::FunctionV0(f) = spec_entry {
+                if let Ok(n) = f.name.to_string() {
+                    if n == name {
+                        return Some(f);
+                    }
+                }
+            }
+        }
+        None
     }
 }
