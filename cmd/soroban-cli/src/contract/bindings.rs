@@ -4,6 +4,7 @@ use clap::{ArgEnum, Parser};
 use soroban_spec::gen::{
     json,
     rust::{self, ToFormattedString},
+    typescript,
 };
 
 use soroban_cli::wasm;
@@ -23,6 +24,8 @@ pub enum Output {
     Rust,
     /// Json representation of contract spec types
     Json,
+    /// Typescript client bindings
+    Typescript,
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -33,6 +36,8 @@ pub enum Error {
     FormatRust(String),
     #[error("generate json from file: {0}")]
     GenerateJsonFromFile(json::GenerateFromFileError),
+    #[error("generate typescript from file: {0}")]
+    GenerateTypescriptFromFile(typescript::GenerateFromFileError),
 }
 
 impl Cmd {
@@ -40,6 +45,7 @@ impl Cmd {
         match self.output {
             Output::Rust => self.generate_rust(),
             Output::Json => self.generate_json(),
+            Output::Typescript => self.generate_typescript(),
         }
     }
 
@@ -66,4 +72,13 @@ impl Cmd {
         println!("{json}");
         Ok(())
     }
+
+    pub fn generate_typescript(&self) -> Result<(), Error> {
+        let wasm_path_str = self.wasm.wasm.to_string_lossy();
+        let code =
+            typescript::generate_from_file(&wasm_path_str, None).map_err(Error::GenerateTypescriptFromFile)?;
+        println!("{code}");
+        Ok(())
+    }
+
 }
