@@ -37,7 +37,7 @@ struct CSnapshotSource {
 }
 
 impl SnapshotSource for CSnapshotSource {
-    fn get(&self, key: &LedgerKey) -> Result<LedgerEntry, HostError> {
+    fn get(&self, key: &Rc<LedgerKey>) -> Result<Rc<LedgerEntry>, HostError> {
         let key_xdr = key
             .to_xdr_base64()
             .map_err(|_| ScStatus::UnknownError(Xdr))?;
@@ -55,10 +55,10 @@ impl SnapshotSource for CSnapshotSource {
         let entry =
             LedgerEntry::from_xdr_base64(res_str).map_err(|_| ScStatus::UnknownError(Xdr))?;
         unsafe { FreeGoCString(res) };
-        Ok(entry)
+        Ok(entry.into())
     }
 
-    fn has(&self, key: &LedgerKey) -> Result<bool, HostError> {
+    fn has(&self, key: &Rc<LedgerKey>) -> Result<bool, HostError> {
         let key_xdr = key
             .to_xdr_base64()
             .map_err(|_| ScStatus::UnknownError(Xdr))?;

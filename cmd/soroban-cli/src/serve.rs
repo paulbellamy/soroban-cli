@@ -203,7 +203,7 @@ fn get_ledger_entry(k: Box<[String]>, ledger_file: &PathBuf) -> Result<Value, Er
 
         let snap = Rc::new(state);
         let mut storage = Storage::with_recording_footprint(snap);
-        let ledger_entry = storage.get(&key, &soroban_env_host::budget::Budget::default())?;
+        let ledger_entry = storage.get(&Rc::new(key), &soroban_env_host::budget::Budget::default())?;
 
         Ok(json!({
             "xdr": ledger_entry.data.to_xdr_base64()?,

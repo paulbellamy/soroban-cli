@@ -1,4 +1,4 @@
-use std::{io::ErrorKind, path::Path};
+use std::{io::ErrorKind, path::Path, rc::Rc};
 
 use ed25519_dalek::Signer;
 use hex::FromHexError;
@@ -170,10 +170,13 @@ pub fn get_contract_spec_from_storage(
     storage: &mut Storage,
     contract_id: [u8; 32],
 ) -> Result<Vec<ScSpecEntry>, FromWasmError> {
-    let key = LedgerKey::ContractData(LedgerKeyContractData {
-        contract_id: contract_id.into(),
-        key: ScVal::Static(ScStatic::LedgerKeyContractCode),
-    });
+    let entry = storage.get(
+        &Rc::new(LedgerKey::ContractData(LedgerKeyContractData {
+            contract_id: contract_id.into(),
+            key: ScVal::Static(ScStatic::LedgerKeyContractCode),
+        })),
+        &Budget::default(),
+    ).map_err(|_| FromWasmError::NotFound)?;
     if let Ok(LedgerEntry {
         data:
             LedgerEntryData::ContractData(ContractDataEntry {
@@ -181,21 +184,21 @@ pub fn get_contract_spec_from_storage(
                 ..
             }),
         ..
-    }) = storage.get(&key, &Budget::default())
-    {
+    }) = Rc::try_unwrap(entry) {
         match c {
             ScContractCode::Token => {
                 let res = soroban_spec::read::parse_raw(&soroban_token_spec::spec_xdr());
                 res.map_err(FromWasmError::Parse)
             }
             ScContractCode::WasmRef(hash) => {
+                let code_entry = storage.get(
+                    &Rc::new(LedgerKey::ContractCode(LedgerKeyContractCode { hash })),
+                    &Budget::default(),
+                ).map_err(|_| FromWasmError::NotFound)?;
                 if let Ok(LedgerEntry {
                     data: LedgerEntryData::ContractCode(ContractCodeEntry { code, .. }),
                     ..
-                }) = storage.get(
-                    &LedgerKey::ContractCode(LedgerKeyContractCode { hash }),
-                    &Budget::default(),
-                ) {
+                }) = Rc::try_unwrap(code_entry) {
                     soroban_spec::read::from_wasm(&code)
                 } else {
                     Err(FromWasmError::NotFound)
