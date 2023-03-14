@@ -35,13 +35,13 @@ pub enum Error {
     TransactionSimulationFailed(String),
     #[error("Missing result in successful response")]
     MissingResult,
+    #[error("Failed to read Error response from server")]
+    MissingError,
 }
 
-// TODO: this should also be used by serve
 #[derive(serde::Deserialize, serde::Serialize, Debug)]
 pub struct SendTransactionResponse {
-    #[serde(rename = "transactionHash")]
-    pub transaction_hash: String,
+    pub hash: String,
     pub status: String,
     #[serde(
         rename = "errorResultXdr",
@@ -61,23 +61,32 @@ pub struct SendTransactionResponse {
     pub latest_ledger_close_time: u32,
 }
 
-// TODO: this should also be used by serve
 #[derive(serde::Deserialize, serde::Serialize, Debug)]
 pub struct GetTransactionResponse {
     pub status: String,
+    #[serde(
+        rename = "envelopeXdr",
+        skip_serializing_if = "Option::is_none",
+        default
+    )]
+    pub envelope_xdr: Option<String>,
     #[serde(rename = "resultXdr", skip_serializing_if = "Option::is_none", default)]
     pub result_xdr: Option<String>,
+    #[serde(
+        rename = "resultMetaXdr",
+        skip_serializing_if = "Option::is_none",
+        default
+    )]
+    pub result_meta_xdr: Option<String>,
     // TODO: add ledger info and application order
 }
 
-// TODO: this should also be used by serve
 #[derive(serde::Deserialize, serde::Serialize, Debug)]
 pub struct GetLedgerEntryResponse {
     pub xdr: String,
     // TODO: add lastModifiedLedgerSeq and latestLedger
 }
 
-// TODO: this should also be used by serve
 #[derive(serde::Deserialize, serde::Serialize, Debug)]
 pub struct Cost {
     #[serde(rename = "cpuInsns")]
@@ -173,7 +182,6 @@ impl Client {
         headers.insert("X-Client-Name", "soroban-cli".parse().unwrap());
         let version = VERSION.unwrap_or("devel");
         headers.insert("X-Client-Version", version.parse().unwrap());
-        // TODO: We should consider migrating the server subcommand to jsonrpsee
         Ok(HttpClientBuilder::default()
             .set_headers(headers)
             .build(url)?)
@@ -201,7 +209,7 @@ impl Client {
     ) -> Result<TransactionResult, Error> {
         let client = self.client()?;
         let SendTransactionResponse {
-            transaction_hash,
+            hash,
             error_result_xdr,
             status,
             ..
@@ -211,7 +219,7 @@ impl Client {
             .map_err(|_| Error::TransactionSubmissionFailed)?;
 
         if status == "ERROR" {
-            eprintln!("error: {}", error_result_xdr.unwrap());
+            eprintln!("error: {}", error_result_xdr.ok_or(Error::MissingError)?);
             return Err(Error::TransactionSubmissionFailed);
         }
         // even if status == "success" we need to query the transaction status in order to get the result
@@ -219,7 +227,7 @@ impl Client {
         // Poll the transaction status
         let start = Instant::now();
         loop {
-            let response = self.get_transaction(&transaction_hash).await?;
+            let response = self.get_transaction(&hash).await?;
             match response.status.as_str() {
                 "SUCCESS" => {
                     // TODO: the caller should probably be printing this
